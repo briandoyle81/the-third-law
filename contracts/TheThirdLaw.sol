@@ -14,10 +14,14 @@ error GameNotActive();
 error AlreadyRegistered();
 error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
+error NotEnoughTimePassed();
 
-int constant QUADRANT_SIZE = 30;
-int constant START_DISTANCE = 20;
+int constant QUADRANT_SIZE = 20;
+int constant START_DISTANCE = 15;
 uint constant ASTEROID_SIZE = 10; // Manhattan distance
+
+int constant K = 32; // K factor
+int constant D = 400; // divisor for expected score calculation
 
 enum LeftOrRight {
     None,
@@ -57,7 +61,8 @@ contract TheThirdLaw is Ownable {
     uint public maxMines = 5;
     uint public torpedoFuel = 10;
     uint public mineRange = 2;
-    int public torpedoAccel = 3;
+    int public torpedoAccel = 1; // TODO: CRITICAL -> This may need to be locked to 1 now
+    int public torpedoRange = 1; // TODO: Decide to make this adjustable or constant
 
     // 5 minutes in milliseconds
     uint public turnTimeout = 5 * 60 * 1000;
@@ -67,10 +72,6 @@ contract TheThirdLaw is Ownable {
     // Super savvy players can find this and use it to decide whether or not
     // to join an open game
     uint openGameId = 0;
-
-    // If a miner wants to manipulate a block just to go first or pick start
-    // that's fine.
-    uint insecureSeed = 8291981;
 
     mapping(address => Player) public players;
 
@@ -119,6 +120,7 @@ contract TheThirdLaw is Ownable {
         uint value; // Amount to be paid to victor, or split if there is a tie
         address currentPlayer; // Set to None if game not started or is over
         uint lastTurnTimestamp;
+        // TODO: CRITICAL -> Add the torpedo and mine stats here and use them so old games stay as expected if changes are made
     }
 
     struct Player {
@@ -169,12 +171,50 @@ contract TheThirdLaw is Ownable {
     }
 
     // PUBLIC
+    function createOrJoinRandomGame() public payable isActive {
+        if (msg.value != gameCost) revert NotEnoughFunds();
+
+        if (players[msg.sender].ownerAddress == address(0)) {
+            _registerPlayer(msg.sender);
+        }
+
+        if (openGameId == 0) {
+            openGameId = games.length;
+            games.push();
+            games[openGameId].id = openGameId;
+            games[openGameId].player1Address = msg.sender;
+            games[openGameId].value = msg.value;
+            players[msg.sender].gameIds.push(openGameId);
+            players[msg.sender].inviteIds.push(openGameId); // TODO: This is probably not the best way to handle this
+
+            emit OpenGameCreated(msg.sender, openGameId);
+        } else {
+            games[openGameId].player2Address = msg.sender;
+            games[openGameId].value += msg.value;
+            players[msg.sender].gameIds.push(openGameId);
+            players[msg.sender].inviteIds.push(openGameId); // TODO: This is probably not the best way to handle this
+
+            _startGame(openGameId);
+
+            emit OpenGameJoined(
+                games[openGameId].player1Address,
+                msg.sender,
+                openGameId
+            );
+
+            openGameId = 0;
+        }
+    }
 
     function inviteToGame(address _player2Address) public payable isActive {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
         if (players[msg.sender].ownerAddress == address(0)) {
-            _registerPlayer();
+            _registerPlayer(msg.sender);
+        }
+
+        if (players[_player2Address].ownerAddress == address(0)) {
+            _registerPlayer(_player2Address);
         }
 
         uint gameId = games.length;
@@ -192,10 +232,6 @@ contract TheThirdLaw is Ownable {
 
     function acceptInvite(uint _gameId) public payable {
         if (msg.value != gameCost) revert NotEnoughFunds();
-
-        if (players[msg.sender].ownerAddress == address(0)) {
-            _registerPlayer();
-        }
 
         if (games[_gameId].player2Address != msg.sender)
             revert NotInvited(_gameId);
@@ -230,6 +266,56 @@ contract TheThirdLaw is Ownable {
         if (game.status != Status.Active) revert GameNotActive();
         if (game.currentPlayer != msg.sender) revert NotYourTurn();
 
+        _processTurn(_gameId, _leftOrRight, _upOrDown, _action);
+    }
+
+    // If it's been 5 minutes since the last player's turn, then either player
+    // can end the game in a draw
+    // TODO: Audit priority
+    function endGame(uint _gameId) public {
+        // Only one of the players in the game can call this function
+        if (
+            games[_gameId].player1Address != msg.sender &&
+            games[_gameId].player2Address != msg.sender
+        ) revert NotYourGame();
+
+        if (games[_gameId].status != Status.Active) revert GameNotActive();
+
+        if (block.timestamp - games[_gameId].lastTurnTimestamp < turnTimeout)
+            revert NotEnoughTimePassed();
+
+        _endGame(_gameId, Status.Draw);
+    }
+
+    // If it's been 5 minutes since the last player's turn, the other player
+    // can force their opponent to move with no input
+    // TODO: Audit priority
+    function forceMove(uint _gameId) public {
+        Game storage game = games[_gameId];
+
+        if (game.status != Status.Active) revert GameNotActive();
+
+        if (
+            game.player1Address != msg.sender &&
+            game.player2Address != msg.sender
+        ) revert NotYourGame();
+
+        if (block.timestamp - game.lastTurnTimestamp < turnTimeout) {
+            revert NotEnoughTimePassed();
+        }
+
+        _processTurn(_gameId, LeftOrRight.None, UpOrDown.None, Action.None);
+    }
+
+    // INTERNAL
+
+    function _processTurn(
+        uint _gameId,
+        LeftOrRight _leftOrRight,
+        UpOrDown _upOrDown,
+        Action _action
+    ) internal {
+        Game storage game = games[_gameId];
         Ship storage ship;
         Ship storage enemyShip;
 
@@ -286,25 +372,6 @@ contract TheThirdLaw is Ownable {
         }
     }
 
-    // If it's been 5 minutes since the last player's turn, then either player
-    // can end the game in a draw
-
-    function endGame(uint _gameId) public {
-        // Only one of the players in the game can call this function
-        if (
-            games[_gameId].player1Address != msg.sender &&
-            games[_gameId].player2Address != msg.sender
-        ) revert NotYourGame();
-
-        _endGame(_gameId, Status.Draw);
-    }
-
-    // If it's been 5 minutes since the last player's turn, the other player
-    // can force their opponent to move with no input
-    // TODO: CRITICAL
-
-    // INTERNAL
-
     function _moveShip(Ship storage _ship) internal {
         _ship.position.row += _ship.velocity.row;
         _ship.position.col += _ship.velocity.col;
@@ -320,21 +387,38 @@ contract TheThirdLaw is Ownable {
                 continue;
             } else {
                 _torpedoes[i].remainingFuel -= 1;
-                Position memory nextTorpedoPosition = Position(
-                    _torpedoes[i].position.row + _torpedoes[i].velocity.row,
-                    _torpedoes[i].position.col + _torpedoes[i].velocity.col
-                );
-                // If the nextTorpedoPosition is within torpedoAccel of the enemy ship,
-                // then the torpedo has hit the enemy ship and the game is over.
-                // We have to check row and col separately because the movement is
-                // constrained to torpedoAccel in each direction.
+
+                // Calculate relative position
+                int row_r = _enemyShip.position.row -
+                    _torpedoes[i].position.row;
+                int col_r = _enemyShip.position.col -
+                    _torpedoes[i].position.col;
+
+                // Adjust the torpedo's velocity based on relative position
+                if (row_r > 0) {
+                    _torpedoes[i].velocity.row += 1;
+                } else if (row_r < 0) {
+                    _torpedoes[i].velocity.row -= 1;
+                }
+
+                if (col_r > 0) {
+                    _torpedoes[i].velocity.col += 1;
+                } else if (col_r < 0) {
+                    _torpedoes[i].velocity.col -= 1;
+                }
+
+                // Move the torpedo based on its velocity
+                _torpedoes[i].position.row += _torpedoes[i].velocity.row;
+                _torpedoes[i].position.col += _torpedoes[i].velocity.col;
+
+                // If the torpedo is within 1 square of the enemy ship, it hits and the game is over
+                // Use row and column, not manhattan distance
                 if (
-                    abs(nextTorpedoPosition.row - _enemyShip.position.row) <=
-                    torpedoAccel &&
-                    abs(nextTorpedoPosition.col - _enemyShip.position.col) <=
-                    torpedoAccel
+                    abs(_torpedoes[i].position.row - _enemyShip.position.row) <=
+                    torpedoRange &&
+                    abs(_torpedoes[i].position.col - _enemyShip.position.col) <=
+                    torpedoRange
                 ) {
-                    // This player has hit the enemy ship and won
                     if (_enemyShip.ownerAddress == _game.player1Address) {
                         _endGame(_game.id, Status.Player1Destroyed);
                     } else {
@@ -342,76 +426,12 @@ contract TheThirdLaw is Ownable {
                     }
                 }
 
-                // Otherwise, change the nextTorpedoPosition's row and col
-                // by a maximun of torpedoAccel in each direction so that it's
-                // as close to the enemy ship as possible
-
-                // First, check if the torpedo is above or below the enemy ship
-
-                // If the torpedo is above the enemy ship, then the torpedo's
-                // row should be decreased by a maximum of torpedoAccel
-                if (nextTorpedoPosition.row < _enemyShip.position.row) {
-                    if (
-                        nextTorpedoPosition.row + torpedoAccel <
-                        _enemyShip.position.row
-                    ) {
-                        nextTorpedoPosition.row += torpedoAccel;
-                    } else {
-                        nextTorpedoPosition.row = _enemyShip.position.row;
-                    }
-                }
-                // If the torpedo is below the enemy ship, then the torpedo's
-                // row should be increased by a maximum of torpedoAccel
-                else if (nextTorpedoPosition.row > _enemyShip.position.row) {
-                    if (
-                        nextTorpedoPosition.row - torpedoAccel >
-                        _enemyShip.position.row
-                    ) {
-                        nextTorpedoPosition.row -= torpedoAccel;
-                    } else {
-                        nextTorpedoPosition.row = _enemyShip.position.row;
-                    }
-                }
-
-                // Next, check if the torpedo is to the left or right of the enemy ship
-
-                // If the torpedo is to the left of the enemy ship, then the torpedo's
-                // col should be decreased by a maximum of torpedoAccel
-                if (nextTorpedoPosition.col < _enemyShip.position.col) {
-                    if (
-                        nextTorpedoPosition.col + torpedoAccel <
-                        _enemyShip.position.col
-                    ) {
-                        nextTorpedoPosition.col += torpedoAccel;
-                    } else {
-                        nextTorpedoPosition.col = _enemyShip.position.col;
-                    }
-                }
-                // If the torpedo is to the right of the enemy ship, then the torpedo's
-                // col should be increased by a maximum of torpedoAccel
-                else if (nextTorpedoPosition.col > _enemyShip.position.col) {
-                    if (
-                        nextTorpedoPosition.col - torpedoAccel >
-                        _enemyShip.position.col
-                    ) {
-                        nextTorpedoPosition.col -= torpedoAccel;
-                    } else {
-                        nextTorpedoPosition.col = _enemyShip.position.col;
-                    }
-                }
-
-                // Update the torpedo's velocity to match the acceleration changes
-                _torpedoes[i].velocity = Velocity(
-                    nextTorpedoPosition.row - _torpedoes[i].position.row,
-                    nextTorpedoPosition.col - _torpedoes[i].position.col
-                );
-
-                _torpedoes[i].position = nextTorpedoPosition;
-
-                // If the torpedo has hit an asteroid, then the torpedo is destroyed
+                // Check for collisions with asteroid
                 if (
-                    _manhattanDistance(nextTorpedoPosition, Position(0, 0)) <=
-                    ASTEROID_SIZE
+                    _manhattanDistance(
+                        _torpedoes[i].position,
+                        Position(0, 0)
+                    ) <= ASTEROID_SIZE
                 ) {
                     _torpedoes[i].remainingFuel = 0;
                 }
@@ -535,14 +555,81 @@ contract TheThirdLaw is Ownable {
             payable(game.player2Address).transfer(balance);
         }
 
+        (uint newRating1, uint newRating2) = calculateElo(
+            int(players[game.player1Address].eloRating),
+            int(players[game.player2Address].eloRating),
+            _status
+        );
+
+        players[game.player1Address].eloRating = newRating1;
+        players[game.player2Address].eloRating = newRating2;
+
         emit GameOver(game.player1Address, game.player2Address, _gameId);
     }
 
-    function _registerPlayer() internal {
-        if (players[msg.sender].ownerAddress != address(0))
+    // TODO: This may be expensive
+    // TODO: Investigate consequenses of gaming this with multiple games and choosing when to end/lose
+    // TODO: Decide to only do 50 or 75% ELO change if one player flees
+    // Calculate the new ELO ratings of two players
+
+    function calculateElo(
+        int _ratingA,
+        int _ratingB,
+        Status _result
+    ) public pure returns (uint, uint) {
+        int expectedA = fixedPointDivision(
+            1,
+            1 + pow(10, (_ratingB - _ratingA) / D)
+        );
+        int expectedB = 1 - expectedA;
+
+        int scoreA;
+        // First player 1
+        if (
+            _result == Status.Player2Destroyed || _result == Status.Player2Fled
+        ) {
+            scoreA = 1;
+        } else if (_result == Status.Draw) {
+            scoreA = 0;
+        } else {
+            scoreA = -1;
+        }
+        int scoreB = -scoreA;
+
+        int newRatingA = int(_ratingA) + K * (scoreA - expectedA);
+        int newRatingB = int(_ratingB) + K * (scoreB - expectedB);
+
+        if (newRatingA < 0) {
+            newRatingA = 0;
+        }
+        if (newRatingB < 0) {
+            newRatingB = 0;
+        }
+        return (uint(newRatingA), uint(newRatingB));
+    }
+
+    // Helper function to simulate 10^x using fixed point arithmetic
+    function pow(int base, int exponent) internal pure returns (int) {
+        int result = 1;
+        for (int i = 0; i < exponent; i++) {
+            result *= base;
+        }
+        return result;
+    }
+
+    // Helper function for fixed point division
+    function fixedPointDivision(
+        int numerator,
+        int denominator
+    ) internal pure returns (int) {
+        return (numerator * 1000) / denominator;
+    }
+
+    function _registerPlayer(address _player) internal {
+        if (players[_player].ownerAddress != address(0))
             revert AlreadyRegistered();
-        players[msg.sender] = Player(
-            msg.sender,
+        players[_player] = Player(
+            _player,
             new uint[](0),
             new uint[](0),
             0,
