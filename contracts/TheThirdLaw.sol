@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
 
 error ContractPaused();
 error NotEnoughFunds();
@@ -53,6 +54,11 @@ enum Status {
 }
 
 contract TheThirdLaw is Ownable {
+    using EnumerableMap for EnumerableMap.AddressToUintMap;
+
+    // I expect this to break if it gets big enough
+    EnumerableMap.AddressToUintMap private addressToELO;
+
     uint public gameCost = 0.001 ether;
     uint public feePercent = 10;
     uint public feeBalance = 0;
@@ -564,6 +570,9 @@ contract TheThirdLaw is Ownable {
         players[game.player1Address].eloRating = newRating1;
         players[game.player2Address].eloRating = newRating2;
 
+        addressToELO.set(game.player1Address, newRating1);
+        addressToELO.set(game.player2Address, newRating2);
+
         emit GameOver(game.player1Address, game.player2Address, _gameId);
     }
 
@@ -640,6 +649,8 @@ contract TheThirdLaw is Ownable {
             1200,
             0
         );
+
+        addressToELO.set(_player, 1200);
     }
 
     function _startGame(uint _gameId) internal {
@@ -741,6 +752,20 @@ contract TheThirdLaw is Ownable {
 
     function getGame(uint _gameId) public view returns (Game memory) {
         return games[_gameId];
+    }
+
+    struct PlayerELO {
+        address playerAddress;
+        uint eloRating;
+    }
+
+    function getAllELO() external view returns (PlayerELO[] memory) {
+        PlayerELO[] memory playerELOs = new PlayerELO[](addressToELO.length());
+        for (uint i = 0; i < addressToELO.length(); i++) {
+            (address playerAddress, uint elo) = addressToELO.at(i);
+            playerELOs[i] = PlayerELO(playerAddress, elo);
+        }
+        return playerELOs;
     }
 
     // MODIFIERS
