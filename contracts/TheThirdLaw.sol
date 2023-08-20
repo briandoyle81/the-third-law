@@ -4,6 +4,10 @@ pragma solidity ^0.8.19;
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableMap.sol";
+import "./Elo.sol";
+
+// TODO: Add admin function to cancel games if they're too old, or never start
+// TODO: Consider requiring someone to join a game before they show up on leaderboard
 
 error ContractPaused();
 error NotEnoughFunds();
@@ -16,13 +20,13 @@ error AlreadyRegistered();
 error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
 error NotEnoughTimePassed();
+error RatingTooDifferent(uint);
 
 int constant QUADRANT_SIZE = 20;
 int constant START_DISTANCE = 15;
 uint constant ASTEROID_SIZE = 10; // Manhattan distance
 
-int constant K = 32; // K factor
-int constant D = 400; // divisor for expected score calculation
+int constant K = 1; // K factor
 
 enum LeftOrRight {
     None,
@@ -576,62 +580,73 @@ contract TheThirdLaw is Ownable {
         emit GameOver(game.player1Address, game.player2Address, _gameId);
     }
 
+    // TODO: I don't understand how K factor works.  Recommended was 32 or 20, but that gave drastic results
+    // 1 seems to work well initially, don't know what will happen later
+    // TODO: CRITICAL -> Understand and validate max rating differences!
+    // TODO: Find a more elegant way to handle than blocking games
     // TODO: This may be expensive
     // TODO: Investigate consequenses of gaming this with multiple games and choosing when to end/lose
     // TODO: Decide to only do 50 or 75% ELO change if one player flees
     // Calculate the new ELO ratings of two players
-
+    // TODO: This is probably abusable since we allow players to play themselves
     function calculateElo(
         int _ratingA,
         int _ratingB,
         Status _result
     ) public pure returns (uint, uint) {
-        int expectedA = fixedPointDivision(
-            1,
-            1 + pow(10, (_ratingB - _ratingA) / D)
-        );
-        int expectedB = 1 - expectedA;
+        // DEBUG IGNORE EDGE CASE
 
-        int scoreA;
-        // First player 1
+        // If the ratings are too far apart, don't change them
+        if (abs(_ratingA - _ratingB) > 800) {
+            revert RatingTooDifferent(uint(abs(_ratingA - _ratingB)));
+        }
+
+        // END DEBUG IGNORE EDGE CASE
+
+        uint resultValue;
+
         if (
             _result == Status.Player2Destroyed || _result == Status.Player2Fled
         ) {
-            scoreA = 1;
+            resultValue = 100;
+        } else if (
+            _result == Status.Player1Destroyed || _result == Status.Player1Fled
+        ) {
+            resultValue = 0;
         } else if (_result == Status.Draw) {
-            scoreA = 0;
+            resultValue = 50;
         } else {
-            scoreA = -1;
+            revert("Invalid result");
         }
-        int scoreB = -scoreA;
 
-        int newRatingA = int(_ratingA) + K * (scoreA - expectedA);
-        int newRatingB = int(_ratingB) + K * (scoreB - expectedB);
+        (uint256 change, bool negative) = Elo.ratingChange(
+            uint(_ratingA),
+            uint(_ratingB),
+            resultValue,
+            uint(K)
+        );
+
+        int newRatingA;
+        int newRatingB;
+
+        if (negative) {
+            newRatingA = _ratingA - int(change);
+            newRatingB = _ratingB + int(change);
+        } else {
+            newRatingA = _ratingA + int(change);
+            newRatingB = _ratingB - int(change);
+        }
 
         if (newRatingA < 0) {
             newRatingA = 0;
         }
+
         if (newRatingB < 0) {
             newRatingB = 0;
         }
+        // It shouldn't be possible for ELO to get above maxIint without me being so rich I don't care :D
+
         return (uint(newRatingA), uint(newRatingB));
-    }
-
-    // Helper function to simulate 10^x using fixed point arithmetic
-    function pow(int base, int exponent) internal pure returns (int) {
-        int result = 1;
-        for (int i = 0; i < exponent; i++) {
-            result *= base;
-        }
-        return result;
-    }
-
-    // Helper function for fixed point division
-    function fixedPointDivision(
-        int numerator,
-        int denominator
-    ) internal pure returns (int) {
-        return (numerator * 1000) / denominator;
     }
 
     function _registerPlayer(address _player) internal {
