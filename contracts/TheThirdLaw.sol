@@ -20,7 +20,6 @@ error AlreadyRegistered();
 error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
 error NotEnoughTimePassed();
-error RatingTooDifferent(uint);
 
 int constant QUADRANT_SIZE = 20;
 int constant START_DISTANCE = 15;
@@ -598,7 +597,7 @@ contract TheThirdLaw is Ownable {
 
         // If the ratings are too far apart, don't change them
         if (abs(_ratingA - _ratingB) > 800) {
-            revert RatingTooDifferent(uint(abs(_ratingA - _ratingB)));
+            return (uint(_ratingA), uint(_ratingB));
         }
 
         // END DEBUG IGNORE EDGE CASE
