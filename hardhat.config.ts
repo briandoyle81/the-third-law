@@ -20,6 +20,11 @@ const config: HardhatUserConfig = {
   namedAccounts: {
     deployer: 0,
   },
+  etherscan: {
+    apiKey: {
+      baseGoerli: process.env.BASESCAN_API || "",
+    },
+  },
   networks: {
     // for mainnet
     // "base-mainnet": {

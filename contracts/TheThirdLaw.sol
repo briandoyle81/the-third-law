@@ -20,10 +20,11 @@ error AlreadyRegistered();
 error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
 error NotEnoughTimePassed();
+error NotFirstGame();
 
-int constant QUADRANT_SIZE = 20;
-int constant START_DISTANCE = 15;
-uint constant ASTEROID_SIZE = 10; // Manhattan distance
+int constant QUADRANT_SIZE = 15;
+int constant START_DISTANCE = 12;
+uint constant ASTEROID_SIZE = 7; // Manhattan distance
 
 int constant K = 1; // K factor
 
@@ -70,11 +71,9 @@ contract TheThirdLaw is Ownable {
     uint public maxMines = 5;
     uint public torpedoFuel = 10;
     uint public mineRange = 2;
-    int public torpedoAccel = 1; // TODO: CRITICAL -> This may need to be locked to 1 now
-    int public torpedoRange = 1; // TODO: Decide to make this adjustable or constant
-
-    // 5 minutes in milliseconds
-    uint public turnTimeout = 5 * 60 * 1000;
+    int public torpedoAccel = 1;
+    int public torpedoRange = 1;
+    uint public turnTimeout = 24 hours;
 
     bool public active = true;
 
@@ -143,6 +142,7 @@ contract TheThirdLaw is Ownable {
         uint losses; // Player was destroyed
         uint eloRating;
         uint currentShipId;
+        uint gamesStarted;
     }
 
     struct Ship {
@@ -180,6 +180,7 @@ contract TheThirdLaw is Ownable {
     }
 
     // PUBLIC
+    // TODO: Don't let people join games with themselves here!
     function createOrJoinRandomGame() public payable isActive {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
@@ -218,6 +219,18 @@ contract TheThirdLaw is Ownable {
     function inviteToGame(address _player2Address) public payable isActive {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
+        _processInvite(_player2Address);
+    }
+
+    function inviteToFreeGame(address _player2Address) public isActive {
+        if (players[_player2Address].ownerAddress != address(0)) {
+            revert NotFirstGame();
+        }
+
+        _processInvite(_player2Address);
+    }
+
+    function _processInvite(address _player2Address) internal {
         if (players[msg.sender].ownerAddress == address(0)) {
             _registerPlayer(msg.sender);
         }
@@ -242,10 +255,24 @@ contract TheThirdLaw is Ownable {
     function acceptInvite(uint _gameId) public payable {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
+        _processAcceptInvite(_gameId);
+    }
+
+    function acceptFreeInvite(uint _gameId) public {
+        if (players[msg.sender].gamesStarted != 0) {
+            revert NotFirstGame();
+        }
+
+        _processAcceptInvite(_gameId);
+    }
+
+    function _processAcceptInvite(uint _gameId) internal {
         if (games[_gameId].player2Address != msg.sender)
             revert NotInvited(_gameId);
 
         games[_gameId].value += msg.value;
+        players[games[_gameId].player1Address].gamesStarted++;
+        players[games[_gameId].player2Address].gamesStarted++;
 
         _startGame(_gameId);
 
@@ -272,6 +299,21 @@ contract TheThirdLaw is Ownable {
     ) public {
         Game storage game = games[_gameId];
 
+        if (game.status != Status.Active) revert GameNotActive();
+        if (game.currentPlayer != msg.sender) revert NotYourTurn();
+
+        _processTurn(_gameId, _leftOrRight, _upOrDown, _action);
+    }
+
+    function takeFreeTurn(
+        uint _gameId,
+        LeftOrRight _leftOrRight,
+        UpOrDown _upOrDown,
+        Action _action
+    ) public {
+        Game storage game = games[_gameId];
+
+        if (_gameId != players[msg.sender].gameIds[0]) revert NotFirstGame();
         if (game.status != Status.Active) revert GameNotActive();
         if (game.currentPlayer != msg.sender) revert NotYourTurn();
 
@@ -564,17 +606,20 @@ contract TheThirdLaw is Ownable {
             payable(game.player2Address).transfer(balance);
         }
 
-        (uint newRating1, uint newRating2) = calculateElo(
-            int(players[game.player1Address].eloRating),
-            int(players[game.player2Address].eloRating),
-            _status
-        );
+        // No ELO change if you play yourself!
+        if (game.player1Address != game.player2Address) {
+            (uint newRating1, uint newRating2) = calculateElo(
+                int(players[game.player1Address].eloRating),
+                int(players[game.player2Address].eloRating),
+                _status
+            );
 
-        players[game.player1Address].eloRating = newRating1;
-        players[game.player2Address].eloRating = newRating2;
+            players[game.player1Address].eloRating = newRating1;
+            players[game.player2Address].eloRating = newRating2;
 
-        addressToELO.set(game.player1Address, newRating1);
-        addressToELO.set(game.player2Address, newRating2);
+            addressToELO.set(game.player1Address, newRating1);
+            addressToELO.set(game.player2Address, newRating2);
+        }
 
         emit GameOver(game.player1Address, game.player2Address, _gameId);
     }
@@ -661,6 +706,7 @@ contract TheThirdLaw is Ownable {
             0,
             0,
             1200,
+            0,
             0
         );
 
