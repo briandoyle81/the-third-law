@@ -21,10 +21,13 @@ error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
 error NotEnoughTimePassed();
 error NotFirstGame();
+error YouAreInThisGame();
+error OutOfFreeMoves();
 
 int constant QUADRANT_SIZE = 15;
 int constant START_DISTANCE = 12;
 uint constant ASTEROID_SIZE = 7; // Manhattan distance
+uint constant NUM_FREE_MOVES = 200;
 
 int constant K = 1; // K factor
 
@@ -83,7 +86,8 @@ contract TheThirdLaw is Ownable {
 
     mapping(address => Player) public players;
 
-    Game[] public games;
+    mapping(uint => Game) public games;
+    uint numGames = 0;
 
     event InviteToGame(
         address indexed _player1Address,
@@ -118,6 +122,16 @@ contract TheThirdLaw is Ownable {
         uint indexed _gameId
     );
 
+    event PlayerInput(
+        address indexed _playerAddress,
+        uint indexed _gameId,
+        LeftOrRight _leftOrRight,
+        UpOrDown _upOrDown,
+        Action _action
+    );
+
+    event GameState(uint indexed _gameId, Game _game);
+
     struct Game {
         uint id;
         address player1Address;
@@ -128,6 +142,9 @@ contract TheThirdLaw is Ownable {
         uint value; // Amount to be paid to victor, or split if there is a tie
         address currentPlayer; // Set to None if game not started or is over
         uint lastTurnTimestamp;
+        uint round;
+        uint[] logBlocks;
+        bool free;
         // TODO: CRITICAL -> Add the torpedo and mine stats here and use them so old games stay as expected if changes are made
     }
 
@@ -175,9 +192,7 @@ contract TheThirdLaw is Ownable {
         int col;
     }
 
-    constructor() {
-        games.push();
-    }
+    constructor() {}
 
     // PUBLIC
     // TODO: Don't let people join games with themselves here!
@@ -189,8 +204,8 @@ contract TheThirdLaw is Ownable {
         }
 
         if (openGameId == 0) {
-            openGameId = games.length;
-            games.push();
+            numGames++;
+            openGameId = numGames;
             games[openGameId].id = openGameId;
             games[openGameId].player1Address = msg.sender;
             games[openGameId].value = msg.value;
@@ -199,6 +214,9 @@ contract TheThirdLaw is Ownable {
 
             emit OpenGameCreated(msg.sender, openGameId);
         } else {
+            if (msg.sender == games[openGameId].player1Address) {
+                revert YouAreInThisGame();
+            }
             games[openGameId].player2Address = msg.sender;
             games[openGameId].value += msg.value;
             players[msg.sender].gameIds.push(openGameId);
@@ -219,7 +237,7 @@ contract TheThirdLaw is Ownable {
     function inviteToGame(address _player2Address) public payable isActive {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
-        _processInvite(_player2Address);
+        _processInvite(_player2Address, false);
     }
 
     function inviteToFreeGame(address _player2Address) public isActive {
@@ -227,10 +245,10 @@ contract TheThirdLaw is Ownable {
             revert NotFirstGame();
         }
 
-        _processInvite(_player2Address);
+        _processInvite(_player2Address, true);
     }
 
-    function _processInvite(address _player2Address) internal {
+    function _processInvite(address _player2Address, bool _free) internal {
         if (players[msg.sender].ownerAddress == address(0)) {
             _registerPlayer(msg.sender);
         }
@@ -239,12 +257,17 @@ contract TheThirdLaw is Ownable {
             _registerPlayer(_player2Address);
         }
 
-        uint gameId = games.length;
-        games.push();
+        if (_player2Address == msg.sender) {
+            revert YouAreInThisGame();
+        }
+
+        numGames++;
+        uint gameId = numGames; // Could optimize here, 3 gas for clarity is better
         games[gameId].id = gameId;
         games[gameId].player1Address = msg.sender;
         games[gameId].player2Address = _player2Address;
         games[gameId].value = msg.value;
+        games[gameId].free = _free;
         players[msg.sender].gameIds.push(gameId);
         players[_player2Address].gameIds.push(gameId);
         players[_player2Address].inviteIds.push(gameId); // TODO: This is probably not the best way to handle this
@@ -259,6 +282,7 @@ contract TheThirdLaw is Ownable {
     }
 
     function acceptFreeInvite(uint _gameId) public {
+        // Prevent a player with 0 games from playing many free games
         if (players[msg.sender].gamesStarted != 0) {
             revert NotFirstGame();
         }
@@ -313,7 +337,7 @@ contract TheThirdLaw is Ownable {
     ) public {
         Game storage game = games[_gameId];
 
-        if (_gameId != players[msg.sender].gameIds[0]) revert NotFirstGame();
+        if (!game.free) revert NotFirstGame();
         if (game.status != Status.Active) revert GameNotActive();
         if (game.currentPlayer != msg.sender) revert NotYourTurn();
 
@@ -421,6 +445,16 @@ contract TheThirdLaw is Ownable {
         } else {
             game.currentPlayer = game.player1Address;
         }
+
+        // If there are 200 moves, game is no longer free
+        if (game.round == NUM_FREE_MOVES) {
+            game.free = false;
+        }
+
+        game.logBlocks.push(block.number);
+        emit GameState(_gameId, game);
+        emit PlayerInput(msg.sender, _gameId, _leftOrRight, _upOrDown, _action);
+        game.round += 1;
     }
 
     function _moveShip(Ship storage _ship) internal {
