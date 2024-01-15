@@ -33,8 +33,8 @@ const config: HardhatUserConfig = {
     //   gasPrice: 1000000000,
     // },
     // for testnet
-    "base-goerli": {
-      url: "https://goerli.base.org",
+    "base-sepolia": {
+      url: "https://sepolia.base.org",
       accounts: [process.env.PRIVATE_KEY as string],
       gasPrice: 1000000000,
     },
