@@ -20,7 +20,7 @@ error AlreadyRegistered();
 error NotRegistered(address _playerAddress);
 error NotInvited(uint _gameId);
 error NotEnoughTimePassed();
-error NotFirstGame();
+error NotFreeEligible();
 error YouAreInThisGame();
 error OutOfFreeMoves();
 
@@ -28,6 +28,7 @@ int constant QUADRANT_SIZE = 15;
 int constant START_DISTANCE = 12;
 uint constant ASTEROID_SIZE = 7; // Manhattan distance
 uint constant NUM_FREE_MOVES = 200;
+uint constant NUM_FREE_GAMES = 3;
 
 int constant K = 1; // K factor
 
@@ -195,7 +196,6 @@ contract TheThirdLaw is Ownable {
     constructor() {}
 
     // PUBLIC
-    // TODO: Don't let people join games with themselves here!
     function createOrJoinRandomGame() public payable isActive {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
@@ -240,9 +240,11 @@ contract TheThirdLaw is Ownable {
         _processInvite(_player2Address, false);
     }
 
+    // TODO: There is a window here where new users can get spammed with invites
+    // TODO: with minimal cost to the spammer.  Consider adding a cooldown period
     function inviteToFreeGame(address _player2Address) public isActive {
-        if (players[_player2Address].ownerAddress != address(0)) {
-            revert NotFirstGame();
+        if (players[_player2Address].gamesStarted >= NUM_FREE_GAMES) {
+            revert NotFreeEligible();
         }
 
         _processInvite(_player2Address, true);
@@ -278,23 +280,24 @@ contract TheThirdLaw is Ownable {
     function acceptInvite(uint _gameId) public payable {
         if (msg.value != gameCost) revert NotEnoughFunds();
 
-        _processAcceptInvite(_gameId);
+        _processAcceptInvite(_gameId, false);
     }
 
     function acceptFreeInvite(uint _gameId) public {
         // Prevent a player with 0 games from playing many free games
-        if (players[msg.sender].gamesStarted != 0) {
-            revert NotFirstGame();
+        if (players[msg.sender].gamesStarted > NUM_FREE_GAMES) {
+            revert NotFreeEligible();
         }
 
-        _processAcceptInvite(_gameId);
+        _processAcceptInvite(_gameId, true);
     }
 
-    function _processAcceptInvite(uint _gameId) internal {
+    function _processAcceptInvite(uint _gameId, bool _free) internal {
         if (games[_gameId].player2Address != msg.sender)
             revert NotInvited(_gameId);
 
         games[_gameId].value += msg.value;
+        games[_gameId].free = _free;
         players[games[_gameId].player1Address].gamesStarted++;
         players[games[_gameId].player2Address].gamesStarted++;
 
@@ -337,9 +340,15 @@ contract TheThirdLaw is Ownable {
     ) public {
         Game storage game = games[_gameId];
 
-        if (!game.free) revert NotFirstGame();
+        if (!game.free) revert NotFreeEligible();
         if (game.status != Status.Active) revert GameNotActive();
         if (game.currentPlayer != msg.sender) revert NotYourTurn();
+
+        // If there are 200 moves, game is no longer free
+        // -1 because NUM_FREE_MOVES is iterated in _processTurn
+        if (game.round == NUM_FREE_MOVES - 1) {
+            game.free = false;
+        }
 
         _processTurn(_gameId, _leftOrRight, _upOrDown, _action);
     }
@@ -444,11 +453,6 @@ contract TheThirdLaw is Ownable {
             game.currentPlayer = game.player2Address;
         } else {
             game.currentPlayer = game.player1Address;
-        }
-
-        // If there are 200 moves, game is no longer free
-        if (game.round == NUM_FREE_MOVES) {
-            game.free = false;
         }
 
         game.logBlocks.push(block.number);
