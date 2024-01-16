@@ -105,6 +105,7 @@ contract TheThirdLaw is Ownable {
         address indexed _player1Address,
         uint indexed _gameId
     );
+
     event OpenGameJoined(
         address indexed _player1Address,
         address indexed _player2Address,
@@ -441,7 +442,10 @@ contract TheThirdLaw is Ownable {
             );
         }
 
-        _moveShip(ship);
+        _moveShip(ship); // This is important, if you flee before your torpedo hits, that is a tie, if you crash or die, you lose!
+        // Don't need to check torpedos before moving, that is done on other player's turn
+        _checkIfEnemyTorpedosHit(game, ship, enemyShip.torpedoes);
+
         _checkForFleeingBoard(game, ship);
         _checkForAsteroidCollision(game, ship);
         _checkForMineCollision(game, ship, enemyShip.mines);
@@ -464,6 +468,21 @@ contract TheThirdLaw is Ownable {
     function _moveShip(Ship storage _ship) internal {
         _ship.position.row += _ship.velocity.row;
         _ship.position.col += _ship.velocity.col;
+    }
+
+    function _checkIfEnemyTorpedosHit(
+        Game storage _game,
+        Ship storage _ship,
+        Torpedo[] storage _enemyTorpedoes
+    ) internal {
+        for (uint i = 0; i < _enemyTorpedoes.length; i++) {
+            if (_enemyTorpedoes[i].remainingFuel == 0) {
+                continue;
+            } else {
+                // Check for collisions with current player's ship
+                _checkTorpedoHitTarget(_game, _ship, _enemyTorpedoes[i]);
+            }
+        }
     }
 
     function _moveTorpedoesTowardsEnemy(
@@ -496,24 +515,13 @@ contract TheThirdLaw is Ownable {
                     _torpedoes[i].velocity.col -= 1;
                 }
 
+                // Don't need to check before moving, that is done on other player's turn
                 // Move the torpedo based on its velocity
                 _torpedoes[i].position.row += _torpedoes[i].velocity.row;
                 _torpedoes[i].position.col += _torpedoes[i].velocity.col;
 
-                // If the torpedo is within 1 square of the enemy ship, it hits and the game is over
-                // Use row and column, not manhattan distance
-                if (
-                    abs(_torpedoes[i].position.row - _enemyShip.position.row) <=
-                    torpedoRange &&
-                    abs(_torpedoes[i].position.col - _enemyShip.position.col) <=
-                    torpedoRange
-                ) {
-                    if (_enemyShip.ownerAddress == _game.player1Address) {
-                        _endGame(_game.id, Status.Player1Destroyed);
-                    } else {
-                        _endGame(_game.id, Status.Player2Destroyed);
-                    }
-                }
+                // Check for collisions with enemy ship
+                _checkTorpedoHitTarget(_game, _enemyShip, _torpedoes[i]);
 
                 // Check for collisions with asteroid
                 if (
@@ -524,6 +532,27 @@ contract TheThirdLaw is Ownable {
                 ) {
                     _torpedoes[i].remainingFuel = 0;
                 }
+            }
+        }
+    }
+
+    function _checkTorpedoHitTarget(
+        Game storage _game,
+        Ship storage _targetShip,
+        Torpedo storage _torpedo
+    ) internal {
+        // If the torpedo is within 1 square of the enemy ship, it hits and the game is over
+        // Use row and column, not manhattan distance
+        if (
+            abs(_torpedo.position.row - _targetShip.position.row) <=
+            torpedoRange &&
+            abs(_torpedo.position.col - _targetShip.position.col) <=
+            torpedoRange
+        ) {
+            if (_targetShip.ownerAddress == _game.player1Address) {
+                _endGame(_game.id, Status.Player1Destroyed);
+            } else {
+                _endGame(_game.id, Status.Player2Destroyed);
             }
         }
     }
